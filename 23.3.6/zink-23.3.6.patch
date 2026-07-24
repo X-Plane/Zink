@@ -1,0 +1,1195 @@
+diff --git a/.gitattributes b/.gitattributes
+index c0386978fad..1a24b779461 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -4,3 +4,4 @@
+ *.png binary
+ *.gif binary
+ *.ico binary
++xplane/build.sh eol=lf
+diff --git a/meson.build b/meson.build
+index 9b892065a4b..5e2d532e605 100644
+--- a/meson.build
++++ b/meson.build
+@@ -264,7 +264,7 @@ if with_gallium and system_has_kms_drm
+   _glx = get_option('glx')
+   _egl = get_option('egl')
+   if _glx == 'dri' or _egl.enabled() or (_glx == 'disabled' and _egl.allowed())
+-    with_dri = true
++    with_dri = false
+   endif
+ endif
+ 
+@@ -353,7 +353,7 @@ endif
+ 
+ with_platform_android = _platforms.contains('android')
+ with_platform_x11 = _platforms.contains('x11')
+-with_platform_wayland = _platforms.contains('wayland')
++with_platform_wayland = false # _platforms.contains('wayland')
+ with_platform_haiku = _platforms.contains('haiku')
+ with_platform_windows = _platforms.contains('windows')
+ 
+@@ -1603,7 +1603,7 @@ _drm_amdgpu_ver = '2.4.110'
+ _drm_radeon_ver = '2.4.71'
+ _drm_nouveau_ver = '2.4.102'
+ _drm_intel_ver = '2.4.75'
+-_drm_ver = '2.4.109'
++_drm_ver = '2.4.107'
+ 
+ _libdrm_checks = [
+   ['intel', with_gallium_i915],
+@@ -1649,7 +1649,7 @@ else
+   dep_libdrm = null_dep
+ endif
+ if dep_libdrm.found()
+-  pre_args += '-DHAVE_LIBDRM'
++  #pre_args += '-DHAVE_LIBDRM'
+   if with_dri_platform == 'drm' and with_dri
+     with_gallium_drisw_kms = true
+   endif
+diff --git a/src/gallium/drivers/zink/VP_ZINK_requirements.json b/src/gallium/drivers/zink/VP_ZINK_requirements.json
+index a1a09d8fa04..b5d009a15e6 100644
+--- a/src/gallium/drivers/zink/VP_ZINK_requirements.json
++++ b/src/gallium/drivers/zink/VP_ZINK_requirements.json
+@@ -18,7 +18,8 @@
+                 "VK_EXT_line_rasterization": 1,
+                 "VK_KHR_swapchain_mutable_format": 1,
+                 "VK_EXT_border_color_swizzle": 1,
+-                "VK_KHR_descriptor_update_template": 1
++                "VK_KHR_descriptor_update_template": 1,
++                "VK_EXT_depth_clip_control": 1
+             },
+             "features": {
+                 "VkPhysicalDeviceFeatures": {
+@@ -35,6 +36,9 @@
+                 },
+                 "VkPhysicalDeviceLineRasterizationFeaturesEXT": {
+                     "rectangularLines": true
++                },
++                "VkPhysicalDeviceDepthClipControlFeaturesEXT": {
++                    "depthClipControl": true
+                 }
+             }
+         },
+@@ -95,7 +99,8 @@
+                     "independentBlend": true
+                 },
+                 "VkPhysicalDeviceTransformFeedbackFeaturesEXT": {
+-                    "transformFeedback": true
++                    "transformFeedback": true,
++                    "geometryStreams": true
+                 },
+                 "VkPhysicalDeviceConditionalRenderingFeaturesEXT": {
+                     "conditionalRendering": true
+@@ -415,7 +420,8 @@
+                     "extendedDynamicState3DepthClipEnable": true,
+                     "extendedDynamicState3ProvokingVertexMode": true,
+                     "extendedDynamicState3LineRasterizationMode": true,
+-                    "extendedDynamicState3DepthClipNegativeOneToOne": true
++                    "extendedDynamicState3DepthClipNegativeOneToOne": true,
++                    "extendedDynamicState3LineStippleEnable": true
+                 },
+                 "VkPhysicalDeviceFeatures": {
+                     "textureCompressionBC": true
+@@ -458,6 +464,9 @@
+             }
+         },
+         "gl46_optimal_vk13": {
++            "extensions": {
++                "VK_EXT_provoking_vertex": 1
++            },
+             "features": {
+                 "VkPhysicalDeviceVulkan13Features": {
+                     "dynamicRendering": true
+diff --git a/src/gallium/drivers/zink/zink_batch.c b/src/gallium/drivers/zink/zink_batch.c
+index 533d3e0abc4..eeffa8f9ada 100644
+--- a/src/gallium/drivers/zink/zink_batch.c
++++ b/src/gallium/drivers/zink/zink_batch.c
+@@ -659,7 +659,7 @@ submit_queue(void *data, void *gdata, int thread_index)
+       bs->is_device_lost = true;
+       goto end;
+    }
+-   if (bs->has_barriers) {
++   {
+       if (bs->unordered_write_access) {
+          VkMemoryBarrier mb;
+          mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+diff --git a/src/gallium/drivers/zink/zink_bo.c b/src/gallium/drivers/zink/zink_bo.c
+index eea3584e576..fac9b7ec980 100644
+--- a/src/gallium/drivers/zink/zink_bo.c
++++ b/src/gallium/drivers/zink/zink_bo.c
+@@ -146,7 +146,10 @@ bo_destroy(struct zink_screen *screen, struct pb_buffer *pbuf)
+       zink_bo_unmap(screen, bo);
+    }
+ 
+-   VKSCR(FreeMemory)(screen->dev, bo->mem, NULL);
++   if (bo->vma_token)
++      s_xplane_zink_free_memory(bo->vma_token);
++   else
++      VKSCR(FreeMemory)(screen->dev, bo->mem, NULL);
+ 
+    simple_mtx_destroy(&bo->lock);
+    FREE(bo);
+@@ -289,6 +292,43 @@ bo_create_internal(struct zink_screen *screen,
+       return NULL;
+    }
+ 
++   if(flags == ZINK_ALLOC_ASK_XPLANE)
++   {
++      if (!bo)
++         bo = CALLOC(1, sizeof(struct zink_bo));
++
++      void *cpu_ptr;
++      VkResult ret = s_xplane_zink_allocate_memory(size, alignment, mem_type_idx, &bo->mem, &bo->offset, &cpu_ptr, &bo->vma_token);
++
++      if (!zink_screen_handle_vkresult(screen, ret)) {
++         mesa_loge("zink: couldn't allocate memory: heap=%u size=%" PRIu64, heap, size);
++         if (zink_debug & ZINK_DEBUG_MEM) {
++            zink_debug_mem_print_stats(screen);
++            /* abort with mem debug to allow debugging */
++            abort();
++         }
++         goto fail;
++      }
++
++      simple_mtx_init(&bo->lock, mtx_plain);
++      pipe_reference_init(&bo->base.reference, 1);
++      bo->base.alignment_log2 = util_logbase2(alignment);
++      bo->base.size = size;
++      bo->base.vtbl = &bo_vtbl;
++      bo->base.placement = mem_type_idx;
++      bo->base.usage = flags;
++      bo->unique_id = p_atomic_inc_return(&screen->pb.next_bo_unique_id);
++
++      if(cpu_ptr)
++      {
++         bo->u.real.is_user_ptr = true;
++         bo->u.real.cpu_ptr = cpu_ptr;
++         bo->u.real.map_count = 1;
++      }
++
++      return bo;
++   }
++
+    /* all non-suballocated bo can cache */
+    init_pb_cache = !pNext;
+ 
+@@ -586,7 +626,7 @@ zink_bo_create(struct zink_screen *screen, uint64_t size, unsigned alignment, en
+    unsigned max_slab_entry_size = 1 << (last_slab->min_order + last_slab->num_orders - 1);
+ 
+    /* Sub-allocate small buffers from slabs. */
+-   if (!(flags & (ZINK_ALLOC_NO_SUBALLOC | ZINK_ALLOC_SPARSE)) &&
++   if (!(flags & (ZINK_ALLOC_NO_SUBALLOC | ZINK_ALLOC_SPARSE | ZINK_ALLOC_ASK_XPLANE)) &&
+        size <= max_slab_entry_size) {
+       struct pb_slab_entry *entry;
+ 
+@@ -658,7 +698,7 @@ no_slab:
+       alignment = align(alignment, screen->info.props.limits.minMemoryMapAlignment);
+    }
+ 
+-   bool use_reusable_pool = !(flags & ZINK_ALLOC_NO_SUBALLOC);
++   bool use_reusable_pool = !(flags & (ZINK_ALLOC_NO_SUBALLOC | ZINK_ALLOC_ASK_XPLANE));
+ 
+    if (use_reusable_pool) {
+        /* Get a buffer from the cache. */
+diff --git a/src/gallium/drivers/zink/zink_context.c b/src/gallium/drivers/zink/zink_context.c
+index 67a617cae1b..8044b64102f 100644
+--- a/src/gallium/drivers/zink/zink_context.c
++++ b/src/gallium/drivers/zink/zink_context.c
+@@ -2709,7 +2709,9 @@ zink_update_rendering_info(struct zink_context *ctx)
+ static unsigned
+ calc_max_dummy_fbo_size(struct zink_context *ctx)
+ {
+-   return MIN2(4096, zink_screen(ctx->base.screen)->info.props.limits.maxImageDimension2D);
++   //return MIN2(4096, zink_screen(ctx->base.screen)->info.props.limits.maxImageDimension2D);
++
++   return 8;
+ }
+ 
+ static unsigned
+diff --git a/src/gallium/drivers/zink/zink_device_info.py b/src/gallium/drivers/zink/zink_device_info.py
+index 7dc980c44fc..8fa22a1f292 100644
+--- a/src/gallium/drivers/zink/zink_device_info.py
++++ b/src/gallium/drivers/zink/zink_device_info.py
+@@ -459,6 +459,9 @@ zink_get_physical_device_info(struct zink_screen *screen)
+ %endfor
+    uint32_t num_extensions = 0;
+ 
++   screen->vk.EnumerateDeviceExtensionProperties = s_xplane_zink_enumerate_device_extensions;
++   screen->vk.GetPhysicalDeviceFeatures2 = s_xplane_zink_get_physical_device_features;
++
+    // get device memory properties
+    screen->vk.GetPhysicalDeviceMemoryProperties(screen->pdev, &info->mem_props);
+ 
+diff --git a/src/gallium/drivers/zink/zink_instance.py b/src/gallium/drivers/zink/zink_instance.py
+index d65d502d3a6..d2cfac56cd8 100644
+--- a/src/gallium/drivers/zink/zink_instance.py
++++ b/src/gallium/drivers/zink/zink_instance.py
+@@ -149,6 +149,9 @@ zink_create_instance(struct zink_screen *screen, bool display_dev)
+ 
+    GET_PROC_ADDR_INSTANCE_LOCAL(screen, NULL, EnumerateInstanceExtensionProperties);
+    GET_PROC_ADDR_INSTANCE_LOCAL(screen, NULL, EnumerateInstanceLayerProperties);
++
++   vk_EnumerateInstanceExtensionProperties = s_xplane_enumerate_instance_extensions;
++
+    if (!vk_EnumerateInstanceExtensionProperties ||
+        !vk_EnumerateInstanceLayerProperties)
+       return false;
+@@ -218,6 +221,15 @@ zink_create_instance(struct zink_screen *screen, bool display_dev)
+    }
+ %endfor
+ 
++   {
++      {
++         screen->instance = s_xplane_create_instance(extensions, num_extensions);
++
++         if(screen->instance)
++            return true;
++      }
++   }
++
+ %for layer in layers:
+ <%
+     conditions = ""
+diff --git a/src/gallium/drivers/zink/zink_resource.c b/src/gallium/drivers/zink/zink_resource.c
+index b8f74f68078..bed7c418103 100644
+--- a/src/gallium/drivers/zink/zink_resource.c
++++ b/src/gallium/drivers/zink/zink_resource.c
+@@ -1288,7 +1288,7 @@ retry:
+          continue;
+ 
+       mai.memoryTypeIndex = screen->heap_map[heap][i];
+-      obj->bo = zink_bo(zink_bo_create(screen, reqs.size, alignment, heap, mai.pNext ? ZINK_ALLOC_NO_SUBALLOC : 0, mai.memoryTypeIndex, mai.pNext));
++      obj->bo = zink_bo(zink_bo_create(screen, reqs.size, alignment, heap, mai.pNext ? ZINK_ALLOC_NO_SUBALLOC : ZINK_ALLOC_ASK_XPLANE, mai.memoryTypeIndex, mai.pNext));
+       if (!obj->bo) {
+          if (heap == ZINK_HEAP_DEVICE_LOCAL_VISIBLE) {
+             /* demote BAR allocations to a different heap on failure to avoid oom */
+diff --git a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+index b5597d18273..fc0d117ba7d 100644
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -90,6 +90,34 @@ bool zink_tracing = false;
+ #include <xf86drm.h>
+ #endif
+ 
++VkInstance (*s_xplane_create_instance)(const char *const *, uint32_t);
++VkResult (*s_xplane_enumerate_instance_extensions)(const char *, uint32_t *, VkExtensionProperties *);
++
++VkPhysicalDevice (*s_xplane_zink_get_physical_device)();
++
++VkDevice (*s_xplane_zink_create_device)(const char *const *, uint32_t);
++VkResult (*s_xplane_zink_enumerate_device_extensions)(VkPhysicalDevice, const char *, uint32_t *, VkExtensionProperties *);
++void (*s_xplane_zink_get_physical_device_features)(VkPhysicalDevice, VkPhysicalDeviceFeatures2 *);
++VkResult (*s_xplane_zink_allocate_memory)(uint64_t, uint64_t, uint32_t, VkDeviceMemory *, uint64_t *, void **, void **);
++void (*s_xplane_zink_free_memory)(void *);
++
++PUBLIC void 
++zink_xplane_register_functions(void *zink_enumerate_instance_extensions, void *zink_create_instance, void *zink_get_physical_device, void *zink_enumerate_device_extensions, void *zink_get_physical_device_features, void *zink_create_device, void *zink_allocate_memory, void *zink_free_memory)
++{
++   s_xplane_enumerate_instance_extensions = zink_enumerate_instance_extensions;
++   s_xplane_create_instance = zink_create_instance;
++
++   s_xplane_zink_get_physical_device = zink_get_physical_device;
++
++   s_xplane_zink_enumerate_device_extensions = zink_enumerate_device_extensions;
++   s_xplane_zink_get_physical_device_features = zink_get_physical_device_features;
++
++   s_xplane_zink_create_device = zink_create_device;
++
++   s_xplane_zink_allocate_memory = zink_allocate_memory;
++   s_xplane_zink_free_memory = zink_free_memory;
++}
++
+ static const struct debug_named_value
+ zink_debug_options[] = {
+    { "nir", ZINK_DEBUG_NIR, "Dump NIR during program compile" },
+@@ -1592,6 +1620,7 @@ zink_get_cpu_device_type(const struct zink_screen *screen, uint32_t pdev_count,
+ static void
+ choose_pdev(struct zink_screen *screen, int64_t dev_major, int64_t dev_minor)
+ {
++#if 0
+    bool cpu = debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false) ||
+               debug_get_bool_option("D3D_ALWAYS_SOFTWARE", false);
+ 
+@@ -1641,6 +1670,14 @@ choose_pdev(struct zink_screen *screen, int64_t dev_major, int64_t dev_minor)
+       }
+       screen->pdev = pdev;
+    }
++#else
++   {
++      screen->pdev = s_xplane_zink_get_physical_device();
++   }
++
++   bool cpu = false;
++#endif
++
+    VKSCR(GetPhysicalDeviceProperties)(screen->pdev, &screen->info.props);
+ 
+    /* allow software rendering only if forced by the user */
+@@ -2587,6 +2624,18 @@ hack_it_up:
+ static VkDevice
+ zink_create_logical_device(struct zink_screen *screen)
+ {
++   {
++      {
++         VkDevice device = s_xplane_zink_create_device(screen->info.extensions, screen->info.num_extensions);
++
++         if(device)
++         {
++            screen->sparse_queue = screen->gfx_queue;
++            return device;
++         }
++      }
++   }
++
+    VkDevice dev = VK_NULL_HANDLE;
+ 
+    VkDeviceQueueCreateInfo qci[2] = {0};
+diff --git a/src/gallium/drivers/zink/zink_screen.h b/src/gallium/drivers/zink/zink_screen.h
+index 09a003317fa..11130504a26 100644
+--- a/src/gallium/drivers/zink/zink_screen.h
++++ b/src/gallium/drivers/zink/zink_screen.h
+@@ -159,6 +159,17 @@ zink_screen_debug_marker_begin(struct zink_screen *screen, const char *fmt, ...)
+ void
+ zink_screen_debug_marker_end(struct zink_screen *screen, bool emitted);
+ 
++PUBLIC void 
++zink_xplane_register_functions(void *zink_enumerate_instance_extensions, void *zink_create_instance, void *zink_get_physical_device, void *zink_enumerate_device_extensions, void *zink_get_physical_device_features, void *zink_create_device, void *zink_allocate_memory, void *zink_free_memory);
++
++extern VkInstance (*s_xplane_create_instance)(const char *const *, uint32_t);
++extern VkResult (*s_xplane_enumerate_instance_extensions)(const char *, uint32_t *, VkExtensionProperties *);
++extern VkDevice (*s_xplane_zink_create_device)(const char *const *, uint32_t);
++extern VkResult (*s_xplane_zink_enumerate_device_extensions)(VkPhysicalDevice, const char *, uint32_t *, VkExtensionProperties *);
++extern void (*s_xplane_zink_get_physical_device_features)(VkPhysicalDevice, VkPhysicalDeviceFeatures2 *);
++extern VkResult (*s_xplane_zink_allocate_memory)(uint64_t, uint64_t, uint32_t, VkDeviceMemory *, uint64_t *, void **, void **);
++extern void (*s_xplane_zink_free_memory)(void *);
++
+ #define warn_missing_feature(warned, feat) \
+    do { \
+       if (!warned) { \
+diff --git a/src/gallium/drivers/zink/zink_types.h b/src/gallium/drivers/zink/zink_types.h
+index b6477e3244a..acc205ab7c1 100644
+--- a/src/gallium/drivers/zink/zink_types.h
++++ b/src/gallium/drivers/zink/zink_types.h
+@@ -218,6 +218,7 @@ enum zink_heap {
+ enum zink_alloc_flag {
+    ZINK_ALLOC_SPARSE = 1<<0,
+    ZINK_ALLOC_NO_SUBALLOC = 1<<1,
++   ZINK_ALLOC_ASK_XPLANE = 1<<2
+ };
+ 
+ enum zink_debug {
+@@ -722,6 +723,7 @@ struct zink_bo {
+ 
+    VkDeviceMemory mem;
+    uint64_t offset;
++   void *vma_token;
+ 
+    uint32_t unique_id;
+    const char *name;
+diff --git a/src/gallium/frontends/wgl/stw_st.c b/src/gallium/frontends/wgl/stw_st.c
+index 7db5ebf7f5c..a6fb5e67e33 100644
+--- a/src/gallium/frontends/wgl/stw_st.c
++++ b/src/gallium/frontends/wgl/stw_st.c
+@@ -38,6 +38,8 @@
+ #include "stw_pixelformat.h"
+ #include "stw_winsys.h"
+ 
++#undef GALLIUM_ZINK
++
+ #ifdef GALLIUM_ZINK
+ #include <vulkan/vulkan.h>
+ #include "kopper_interface.h"
+diff --git a/src/gallium/targets/dri/dri.sym b/src/gallium/targets/dri/dri.sym
+index 6f502fa9f92..bf4066e1254 100644
+--- a/src/gallium/targets/dri/dri.sym
++++ b/src/gallium/targets/dri/dri.sym
+@@ -6,6 +6,7 @@
+ 		amdgpu_winsys_create;
+ 		fd_drm_screen_create_renderonly;
+ 		ac_init_shared_llvm_once;
++		zink_xplane_register_functions;
+ 	local:
+ 		*;
+ };
+diff --git a/src/loader/loader.c b/src/loader/loader.c
+index 19c456c7020..cbf4352abdb 100644
+--- a/src/loader/loader.c
++++ b/src/loader/loader.c
+@@ -212,6 +212,8 @@ char *
+ loader_get_render_node(dev_t device)
+ {
+    char *render_node = NULL;
++
++#if 0
+    drmDevicePtr dev_ptr;
+ 
+    if (drmGetDeviceFromDevId(device, 0, &dev_ptr) < 0)
+@@ -224,6 +226,7 @@ loader_get_render_node(dev_t device)
+    }
+ 
+    drmFreeDevice(&dev_ptr);
++#endif
+ 
+    return render_node;
+ }
+@@ -286,6 +289,7 @@ static char *drm_construct_id_path_tag(drmDevicePtr device)
+ {
+    char *tag = NULL;
+ 
++#if 0
+    if (device->bustype == DRM_BUS_PCI) {
+       if (asprintf(&tag, "pci-%04x_%02x_%02x_%1u",
+                    device->businfo.pci->domain,
+@@ -322,6 +326,7 @@ static char *drm_construct_id_path_tag(drmDevicePtr device)
+ 
+       free(name);
+    }
++   #endif
+    return tag;
+ }
+ 
+@@ -342,18 +347,23 @@ static bool drm_device_matches_tag(drmDevicePtr device, const char *prime_tag)
+ static char *drm_get_id_path_tag_for_fd(int fd)
+ {
+    drmDevicePtr device;
+-   char *tag;
++   char *tag = NULL;
+ 
++#if 0
+    if (drmGetDevice2(fd, 0, &device) != 0)
+        return NULL;
+ 
+    tag = drm_construct_id_path_tag(device);
+    drmFreeDevice(&device);
++#endif   
+    return tag;
+ }
+ 
+ bool loader_get_user_preferred_fd(int *fd_render_gpu, int *original_fd)
+ {
++   return false;
++
++#if 0
+    const char *dri_prime = getenv("DRI_PRIME");
+    bool debug = debug_get_bool_option("DRI_PRIME_DEBUG", false);
+    char *default_tag = NULL;
+@@ -551,11 +561,13 @@ bool loader_get_user_preferred_fd(int *fd_render_gpu, int *original_fd)
+    if (original_fd)
+       *original_fd = *fd_render_gpu;
+    return false;
++#endif
+ }
+ 
+ static bool
+ drm_get_pci_id_for_fd(int fd, int *vendor_id, int *chip_id)
+ {
++   #if 0
+    drmDevicePtr device;
+ 
+    if (drmGetDevice2(fd, 0, &device) != 0) {
+@@ -573,6 +585,9 @@ drm_get_pci_id_for_fd(int fd, int *vendor_id, int *chip_id)
+    *chip_id = device->deviceinfo.pci->device_id;
+    drmFreeDevice(&device);
+    return true;
++   #endif
++
++   return false;
+ }
+ 
+ #ifdef __linux__
+@@ -627,7 +642,8 @@ loader_get_pci_id_for_fd(int fd, int *vendor_id, int *chip_id)
+ char *
+ loader_get_device_name_for_fd(int fd)
+ {
+-   return drmGetDeviceNameFromFd2(fd);
++   return NULL;
++   //return drmGetDeviceNameFromFd2(fd);
+ }
+ 
+ static char *
+diff --git a/xplane/build.sh b/xplane/build.sh
+new file mode 100755
+index 00000000000..ad00e4519a8
+--- /dev/null
++++ b/xplane/build.sh
+@@ -0,0 +1,107 @@
++BUILD_TYPE=debugoptimized
++
++BASE_PATH="$(pwd)"
++BUILD_PATH="${BASE_PATH}/xplane/"
++PYTHON_EXECUTABLE="python"
++
++case "$(uname -s)" in
++	Linux)
++		BUILD_TYPE=release
++		;;
++	MINGW*)
++		;;
++	*)
++		echo "Unknown target platform $(uname -s)"
++		;;
++esac
++
++build_linux()
++{
++	meson build64 --libdir lib64 --prefix ${BUILD_PATH}/mesa-build -Dgallium-drivers=zink -Dvulkan-drivers= -Dgbm=false -Degl=false -Dgallium-nine=false -Dosmesa=false -Dbuildtype=${BUILD_TYPE}
++	ninja -C build64
++
++	mkdir -p ${BUILD_PATH}/mesa-xplane
++
++	# Copy over the Mesa libraries we just built
++	cp ./build64/src/glx/libGL.so.1.2.0 ${BUILD_PATH}/mesa-xplane/libGL.so
++	cp ./build64/src/gallium/targets/dri/zink_dri.so ${BUILD_PATH}/mesa-xplane/zink_dri.so
++	cp ./build64/src/mapi/shared-glapi/libglapi.so.0.0.0 ${BUILD_PATH}/mesa-xplane/libglapi.so.0
++
++	# Copy over the support libraries we need to link on other distros
++	cp /lib/x86_64-linux-gnu/libsensors.so.5.0.0 ${BUILD_PATH}/mesa-xplane/libsensors.so.5
++	cp /lib/x86_64-linux-gnu/libffi.so.7.1.0 ${BUILD_PATH}/mesa-xplane/libffi.so.7
++	cp /lib/x86_64-linux-gnu/libedit.so.2.0.63 ${BUILD_PATH}/mesa-xplane/libedit.so.2
++	cp /lib/x86_64-linux-gnu/libLLVM-12.so.1 ${BUILD_PATH}/mesa-xplane/libLLVM-12.so.1
++
++	rm -rf build64
++	rm -rf ${BUILD_PATH}/mesa-build
++}
++
++build_windows()
++{
++	OLD_PATH=${PATH}
++
++	mkdir -p "${BUILD_PATH}/mesa-build"
++	mkdir -p "${BUILD_PATH}/mesa-xplane"
++
++	# Strip our path a bit, removing /usr/bin and /bin so we don't pick up the GNU linker by accident
++	PATH=$(echo ${PATH} | sed -e 's|:/usr/bin||')
++	PATH=$(echo ${PATH} | sed -e 's|:/bin||')
++	export PATH
++
++	meson build64 --libdir lib64 --prefix "${BASE_PATH}/mesa-build" -Dgallium-drivers=zink -Dvulkan-drivers= -Dgallium-nine=false -Dosmesa=false -Dbuildtype=${BUILD_TYPE}
++	ninja -C build64
++	
++	# Restore our path so we find the core utils again
++	PATH=${OLD_PATH}
++	export PATH
++
++	cp "./build64/src/gallium/targets/wgl/libgallium_wgl.dll" "${BUILD_PATH}/mesa-xplane/"
++	cp "./build64/src/gallium/targets/wgl/libgallium_wgl.pdb" "${BUILD_PATH}/mesa-xplane/"
++
++	cp "./build64/src/gallium/targets/libgl-gdi/opengl32.dll" "${BUILD_PATH}/mesa-xplane/"
++	cp "./build64/src/gallium/targets/libgl-gdi/opengl32.pdb" "${BUILD_PATH}/mesa-xplane/"
++
++	cp "./build64/subprojects/zlib-1.3.1/z-1.dll" "${BUILD_PATH}/mesa-xplane/"
++	cp "./build64/subprojects/zlib-1.3.1/z-1.pdb" "${BUILD_PATH}/mesa-xplane/"
++
++	rm -rf build64
++	rm -rf "${BUILD_PATH}/mesa-build"
++}
++
++build_extensions()
++{
++	mkdir -p "${BUILD_PATH}/mesa-xplane"
++	${PYTHON_EXECUTABLE} ./xplane/extensions.py ./src/gallium/drivers/zink/VP_ZINK_requirements.json "${BUILD_PATH}/mesa-xplane"
++}
++
++while test $# -gt 0
++do
++	case "$1" in
++		--debug) BUILD_TYPE=debug
++			;;
++		--extensions)
++			build_extensions
++			exit 1
++			;;
++		*) echo "Unknown option ${1}"
++			;;
++	esac
++
++	shift
++done
++
++case "$(uname -s)" in
++	Linux)
++		PYTHON_EXECUTABLE="python3"
++		build_linux
++		build_extensions
++		;;
++	MINGW*)
++		build_windows
++		build_extensions
++		;;
++	*)
++		echo "Unknown target platform $(uname -s)"
++		;;
++esac
+diff --git a/xplane/docker/Dockerfile b/xplane/docker/Dockerfile
+new file mode 100644
+index 00000000000..cfc88967e7d
+--- /dev/null
++++ b/xplane/docker/Dockerfile
+@@ -0,0 +1,48 @@
++FROM --platform=linux/amd64 ubuntu:focal
++
++# Just enough stuff to get us limping along...
++RUN apt-get update && apt-get install --no-install-recommends -y \
++    wget \
++    gpg-agent \
++    software-properties-common
++
++# Now we need to get CMake 3.19.2 because apt only goes up to 3.16 on 20.04LTS but our minimum is 3.19.
++RUN wget https://cmake.org/files/v3.19/cmake-3.19.2-Linux-x86_64.sh
++RUN /bin/bash cmake-3.19.2-Linux-x86_64.sh --skip-license --prefix=/usr
++
++# Let's us get access to newer a newer CLANG toolchain than Ubuntu 20.04LTS comes with. It wants 12, we want 13. 
++RUN wget -q https://apt.llvm.org/llvm-snapshot.gpg.key
++RUN apt-key add llvm-snapshot.gpg.key
++RUN add-apt-repository 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-13 main'
++
++# Install the wayland protocols version we need
++RUN wget http://archive.ubuntu.com/ubuntu/pool/main/w/wayland-protocols/wayland-protocols_1.25-1_all.deb
++RUN apt-get install ./wayland-protocols_1.25-1_all.deb
++
++# Install base stuff
++RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
++    build-essential \
++    ninja-build \
++    gdb \
++    lldb \
++    llvm-13 \
++    clang-13 \
++    libc++-13-dev \
++    libc++abi-13-dev
++
++# Install Mesa Dependencies
++RUN cp /etc/apt/sources.list /etc/apt/sources.list~ && sed -Ei 's/^# deb-src /deb-src /' /etc/apt/sources.list && apt-get update && apt-get build-dep mesa -y
++
++# Upgrade Meson
++RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
++    python3 \
++    python3-pip
++
++RUN apt-get remove meson -y
++RUN python3 -m pip install meson
++
++# Create a user so the Docker container is usable in CLion. Build with --build-arg UID=$(id -u)
++ARG UID=1000
++RUN useradd -m -u ${UID} -s /bin/bash builder
++USER builder
++
+diff --git a/xplane/extensions.py b/xplane/extensions.py
+new file mode 100644
+index 00000000000..b60a3aa36ae
+--- /dev/null
++++ b/xplane/extensions.py
+@@ -0,0 +1,512 @@
++import sys
++import os
++import json
++import re
++
++# We need at least 4.2 to run with external memory
++wanted_profiles = [ 'VP_ZINK_gl42_baseline', 'VP_ZINK_gl43_baseline', 'VP_ZINK_gl44_baseline', 'VP_ZINK_gl45_baseline', 'VP_ZINK_gl46_baseline' ]
++supported_caps = ['vk13', 'vk12', 'vk11', 'vk10', 'ext']
++
++ignored_extensions = ['VK_KHR_dynamic_rendering', 'VK_EXT_dynamic_rendering_unused_attachments', 'VK_KHR_maintenance4' ]
++ignored_features = ['VkPhysicalDeviceDynamicRenderingFeaturesKHR',
++					'VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT',
++					'VkPhysicalDeviceMaintenance4Features' ]
++
++quirk_bits = [ 'alphaToOne',
++			   'VK_EXT_line_rasterization', 'rectangularLines', 'bresenhamLines',
++			   'VK_EXT_image_2d_view_of_3d', 'image2DViewOf3D',
++			   'VK_EXT_border_color_swizzle', 'borderColorSwizzleFromImage'
++			]
++
++quirk_map = { 'VK_EXT_image_2d_view_of_3d': [ 'image2DViewOf3D' ],
++			  'VK_EXT_border_color_swizzle': [ 'borderColorSwizzleFromImage' ],
++			  'VK_EXT_line_rasterization': [ 'rectangularLines', 'bresenhamLines' ]
++			}
++
++class ZinkProfile:
++	def __init__(self, name, description):
++		self.name = name
++		self.description = description
++
++		self.features = {}
++		self.extensions = set()
++
++	def add_feature(self, ctype, key, value):
++
++		if ctype in self.features:
++			self.features[ctype].append((key, value))
++		else:
++			self.features[ctype] = [(key, value)]
++
++	def add_extension(self, extension):
++		self.extensions.add(extension)
++
++	def name_from_type(self, ctype):
++
++		if ctype.endswith("EXT"):
++			ctype = ctype[:-3]
++			ctype += '_ext'
++
++		return re.sub(r"(\w)([A-Z])", r"\1_\2", ctype[2:]).lower()
++
++	def struct_type(self, ctype):
++
++		extension = ''
++
++		ctype = ctype[2:]  # Strip the leading Vk prefix
++
++		if ctype.endswith("EXT"):
++			ctype = ctype[:-3]
++			extension = '_EXT'
++
++		type_name = re.sub(r"(\w)([A-Z])", r"\1_\2", ctype).upper()
++		result = f'VK_STRUCTURE_TYPE_{type_name}{extension}'
++
++		if result == 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN10_FEATURES':
++			return 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_0_FEATURES'
++
++		if result == 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN11_FEATURES':
++			return 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES'
++
++		if result == 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN12_FEATURES':
++			return 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES'
++
++		if result == 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN13_FEATURES':
++			return 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES'
++
++		if result == 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE2_FEATURES_EXT':
++			return 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT'
++
++		if result == 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE3_FEATURES_EXT':
++			return 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT'
++
++		if result == 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE2_DVIEW_OF3_DFEATURES_EXT':
++			return 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_2D_VIEW_OF_3D_FEATURES_EXT'
++
++		if result == 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KH_R':
++			return 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR'
++
++		if result == 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE4_FEATURES':
++			return 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES'
++
++		if result == 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE5_FEATURES_KH_R':
++			return 'VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR'
++
++		return result
++
++	def build_feature_check(self, check_name, checks):
++
++		result = ''
++
++		for check, value in checks:
++
++			check_value = None
++
++			if value:
++				check_value = 'VK_TRUE'
++			else:
++				check_value = 'VK_FALSE'
++
++			result += f'\t\tif({check_name}.{check} != {check_value})\n'
++
++			if check in quirk_bits:
++				index = quirk_bits.index(check)
++				result += f'\t\t\tquirk_bits |= (1 << {index});\n'
++			else:
++				result += f'\t\t\treturn false;\n'
++
++		return result
++
++	def build_check_code(self):
++
++		code = f'bool GFX_zink_check_{self.name}(gfx_vk_physical_device *physical_device, uint32_t &quirk_bits)\n{{ \n'
++
++		code += '\tquirk_bits = 0;\n'
++
++		if len(self.features) > 0:
++			feature_string = '\tVkPhysicalDeviceFeatures2 check_features = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 }; \n\n';
++
++			for ctype, checks in self.features.items():
++
++				if ctype != 'VkPhysicalDeviceFeatures':
++					name = self.name_from_type(ctype)
++					struct_type = self.struct_type(ctype);
++
++					check = f'\t{ctype} {name} = {{ {struct_type} }};\n'
++					check += f'\tGFX_vk_insert_chain(check_features, {name});\n\n'
++
++					feature_string += check
++
++			code += feature_string
++			code += '\tvkGetPhysicalDeviceFeatures2(physical_device->get_device(), &check_features);\n\n'
++
++			feature_string = ''
++
++			for ctype, checks in self.features.items():
++
++				if ctype != 'VkPhysicalDeviceFeatures':
++
++					name = self.name_from_type(ctype)
++					feature_string += '\t{\n'
++					feature_string += self.build_feature_check(name, checks)
++					feature_string += f'\t}}\n'
++
++				else:
++
++					feature_string += self.build_feature_check('check_features.features', checks)
++
++			feature_string += '\n\n'
++			code += feature_string
++
++		if len(self.extensions) > 0:
++
++			all_extensions = list(self.extensions)
++			all_extensions.sort()
++
++			extension_string = ''
++
++			for extension in all_extensions:
++				extension_string += f'\tif(!physical_device->supports_extension("{extension}"))\n'
++
++				if extension in quirk_bits:
++					extension_string += '\t{\n'
++
++					index = quirk_bits.index(extension)
++					extension_string += f'\t\tquirk_bits |= (1 << {index});\n'
++
++					if extension in quirk_map:
++						features = quirk_map[extension]
++
++						for feature in features:
++							index = quirk_bits.index(feature)
++							extension_string += f'\t\tquirk_bits |= (1 << {index});\n'
++
++					extension_string += '\t}\n'
++				else:
++					extension_string += f'\t\treturn false;\n'
++
++			code += extension_string
++
++		code += '\treturn true;\n}\n\n'
++
++		return code
++
++
++	def build_feature_enablement(self, set_name, checks):
++
++		result = ''
++
++		for check, value in checks:
++
++			check_value = None
++
++			if value:
++				check_value = 'VK_TRUE'
++			else:
++				check_value = 'VK_FALSE'
++
++			if check in quirk_bits and len(checks) > 1:
++				index = quirk_bits.index(check)
++
++				result += f'\t\tif((quirk_bits & (1 << {index})) == 0)\n'
++				result += f'\t\t\t{set_name}{check} = {check_value};\n'
++			else:
++				result += f'\t\t{set_name}{check} = {check_value};\n'
++
++		return result
++
++	def build_check_bitmask(self, checks):
++
++		result = 0
++
++		for check, value in checks:
++
++			if check in quirk_bits:
++
++				index = quirk_bits.index(check)
++				result |= 1 << index
++
++		return result
++
++	def build_enable_code(self):
++
++		code = f'void GFX_zink_enable_{self.name}(set<const char *> &extensions, VkPhysicalDeviceFeatures2 *features, uint32_t quirk_bits)\n{{ \n'
++
++		if len(self.features) > 0:
++			feature_string = ''
++
++			for ctype, checks in self.features.items():
++
++				if ctype != 'VkPhysicalDeviceFeatures':
++					struct_type = self.struct_type(ctype)
++
++					mask = self.build_check_bitmask(checks)
++
++					if mask > 0:
++						feature_string += f'\tif((quirk_bits & {mask}) != {mask})\n'
++
++					feature_string += '\t{\n'
++					feature_string += f'\t\t{ctype} *structure = GFX_find_or_create_structure_in_chain<{ctype}>(features, {struct_type});\n'
++					feature_string += self.build_feature_enablement('structure->', checks)
++					feature_string += f'\t}}\n'
++
++				else:
++					feature_string += self.build_feature_enablement('features->features.', checks)
++
++			feature_string += '\n\n'
++			code += feature_string
++
++		if len(self.extensions) > 0:
++
++			all_extensions = list(self.extensions)
++			all_extensions.sort()
++
++			extension_string = ''
++
++			for extension in all_extensions:
++
++				if extension in quirk_bits:
++					index = quirk_bits.index(extension)
++
++					extension_string += f'\tif((quirk_bits & (1 << {index})) == 0)\n'
++					extension_string += f'\t\textensions.insert("{extension}");\n'
++				else:
++					extension_string += f'\textensions.insert("{extension}");\n'
++
++			code += extension_string
++
++		code += '}\n\n'
++
++		return code
++
++	def build_device_feature_checks(self):
++
++		code = f'void GFX_zink_get_physical_device_features_{self.name}(void *pStart, void *pFeature)\n{{ \n'
++
++		if len(self.features) > 0:
++
++			code += '\tstruct VkGenericStructure\n\t{\n\t\tVkStructureType sType;\n\t\tVkGenericStructure *pNext;\n\t};\n\n'
++			code += '\tVkGenericStructure *feature = (VkGenericStructure *)pFeature;\n\twhile(feature)\n\t{\n\t\tswitch(feature->sType)\n\t\t{\n'
++
++			for ctype, checks in self.features.items():
++
++				check = ''
++
++				if ctype != 'VkPhysicalDeviceFeatures':
++					struct_type = self.struct_type(ctype)
++					mask = self.build_check_bitmask(checks)
++
++					check = f'\t\t\tcase {struct_type}:\n\t\t\t{{\n'
++
++					check += f'\t\t\t\t{ctype} *source = GFX_find_structure_in_chain<{ctype}>(pStart, {struct_type});\n'
++					check += f'\t\t\t\t{ctype} *target = ({ctype} *)feature;\n'
++
++					if mask > 0:
++						check += f'\t\t\t\tif(source)\n'
++						check += f'\t\t\t\t{{\n'
++					else:
++						check += f'\t\t\t\tgfx_rel_assert(source);\n\n'
++
++					check += '\t\t\t\tvoid *next = target->pNext;\n'
++					check += f'\t\t\t\tmemcpy(target, source, sizeof({ctype}));\n'
++					check += '\t\t\t\ttarget->pNext = next;\n'
++
++					if mask > 0:
++						check += f'\t\t\t\t}}\n'
++
++					check += '\t\t\t\tbreak;\n\t\t\t}\n'
++
++				code += check
++
++			code += '\t\t\tdefault:\n'
++			code += '\t\t\t\tbreak;\n'
++
++			code += '\t\t}\n\n'
++			code += '\t\tfeature = feature->pNext;\n'
++			code += '\t}\n'
++
++		code += '}\n\n'
++
++		return code
++
++def parse_capability(codegen, capability):
++	if 'features' in capability:
++		features = capability['features']
++
++		for feature, checks in features.items():
++
++			if feature not in ignored_features:
++				for check, value in checks.items():
++					codegen.add_feature(feature, check, value)
++
++	if 'extensions' in capability:
++		extensions = capability['extensions']
++
++		for extension, ignore in extensions.items():
++			if extension not in ignored_extensions:
++				codegen.add_extension(extension)
++
++def parse_capability_data(data, capability, parsed_profile):
++	if isinstance(capability, str):
++		parse_capability(parsed_profile, data['capabilities'][capability])
++	else:
++		best_suffix = ''
++		best_capability = ''
++
++		for cap in capability:
++			for suffix in supported_caps:
++				if cap.endswith(suffix):
++					if len(best_suffix) == 0:
++						best_suffix = suffix
++						best_capability = cap
++					elif supported_caps.index(suffix) < supported_caps.index(best_suffix):
++						best_suffix = suffix
++						best_capability = cap
++					break
++
++		if len(best_capability) == 0:
++			for cap in capability:
++				parse_capability(parsed_profile, data['capabilities'][cap])
++		else:
++			parse_capability(parsed_profile, data['capabilities'][best_capability])
++
++def parse_profile_requirements(data, profile_name, profile):
++	parsed_profile = ZinkProfile(profile_name, profile['description'])
++
++	for capability in profile['capabilities']:
++		parse_capability_data(data, capability, parsed_profile)
++
++	#if 'optionals' in profile:
++	#	for capability in profile['optionals']:
++	#		parse_capability_data(data, capability, parsed_profile)
++
++	return parsed_profile
++
++def build_profile_implementation(parsed_profiles):
++	code = ''
++
++	for profile in parsed_profiles:
++		code += profile.build_check_code()
++		code += profile.build_enable_code()
++		code += profile.build_device_feature_checks()
++
++	# Check function, returning what profile of Zink we support
++	code += 'GFX_zink_profile GFX_zink_check_profile(gfx_vk_physical_device *physical_device)\n{\n'
++
++	code += f'\tuint32_t quirk_bits; // Unused here!\n'
++
++	for profile in reversed(parsed_profiles):
++		code += f'\tif(GFX_zink_check_{profile.name}(physical_device, quirk_bits))\n'
++		code += f'\t\treturn {profile.name};\n'
++
++	code += '\treturn VP_ZINK_none;\n'
++
++	code += '}\n\n'
++
++	# Enable function, taking the profile of Zink that we want
++	code += f'void GFX_zink_enable_profile(gfx_vk_physical_device *physical_device, set<const char *> &extensions, VkPhysicalDeviceFeatures2 *features, GFX_zink_profile profile)\n{{\n'
++	code += '\tswitch(profile)\n\t{\n'
++
++	for profile in parsed_profiles:
++		code += f'\t\tcase {profile.name}:\n'
++		code += '\t\t{\n'
++
++		code += f'\t\t\tuint32_t quirk_bits;\n'
++		code += f'\t\t\tGFX_zink_check_{profile.name}(physical_device, quirk_bits);\n'
++		code += f'\t\t\tGFX_zink_enable_{profile.name}( extensions, features, quirk_bits);\n'
++
++		code += '\t\t\tbreak;\n'
++		code += '\t\t}\n'
++
++	code += f'\t\tdefault:\n'
++	code += '\t\t\tbreak;\n'
++
++	code += '\t}\n'
++	code += '}\n\n'
++
++	# Check device features
++	code += f'void GFX_zink_get_physical_device_features(void *pStart, void *pFeature, GFX_zink_profile profile)\n{{\n'
++	code += '\tswitch(profile)\n\t{\n'
++
++	for profile in parsed_profiles:
++		code += f'\t\tcase {profile.name}:\n'
++		code += f'\t\t\tGFX_zink_get_physical_device_features_{profile.name}(pStart, pFeature);\n'
++		code += '\t\t\tbreak;\n'
++
++	code += f'\t\tdefault:\n'
++	code += '\t\t\tbreak;\n'
++
++	code += '\t}\n'
++	code += '}\n\n'
++
++	code += 'const char *GFX_zink_get_profile_name(GFX_zink_profile profile)\n{\n'
++	code += '\tswitch(profile)\n\t{\n'
++
++	for profile in parsed_profiles:
++		code += f'\t\tcase {profile.name}:\n'
++		code += f'\t\t\treturn "{profile.name}";\n'
++
++	code += f'\t\tdefault:\n'
++	code += '\t\t\tbreak;\n'
++	code += '\t}\n'
++
++	code += '\treturn "VP_ZINK_none";\n'
++
++	code += '}\n\n'
++
++	return code
++
++def build_profile_header(parsed_profiles):
++	code = 'enum GFX_zink_profile\n{\n\tVP_ZINK_none,\n'
++
++	for profile in parsed_profiles:
++		code += f'\t{profile.name},\n'
++
++	code += '};\n\n'
++
++	code += 'extern const char *GFX_zink_get_profile_name(GFX_zink_profile profile);\n'
++	code += 'extern GFX_zink_profile GFX_zink_check_profile(gfx_vk_physical_device *physical_device);\n'
++	code += 'extern void GFX_zink_enable_profile(gfx_vk_physical_device *physical_device, set<const char *> &extensions, VkPhysicalDeviceFeatures2 *features, GFX_zink_profile profile);\n'
++	code += 'extern void GFX_zink_get_physical_device_features(void *pStart, void *pFeature, GFX_zink_profile profile);\n\n'
++
++	return code
++
++def build_profile_code(data, profile_names):
++	parsed_profiles = []
++
++	for profile_name in profile_names:
++		profile = parse_profile_requirements(data, profile_name, data['profiles'][profile_name])
++		parsed_profiles.append(profile)
++
++	code = build_profile_implementation(parsed_profiles)
++	header = build_profile_header(parsed_profiles)
++
++	return (code, header)
++def parse_extensions(data, destination):
++
++	code, header = build_profile_code(data, wanted_profiles)
++
++	with open(os.path.join(destination, 'gfx_vk_zink_features.cpp'), 'w') as f:
++		f.write('// This file is auto generated! Do not edit manually!\n')
++		f.write('#include "gfx_vk_instance.h"\n')
++		f.write('#include "gfx_vk_zink_features.h"\n\n')
++		f.write(code)
++
++	with open(os.path.join(destination, 'gfx_vk_zink_features.h'), 'w') as f:
++		f.write('// This header is auto generated! Do not edit manually!\n')
++		f.write('#ifndef __GFX_ZINK_FEATURES_H__\n')
++		f.write('#define __GFX_ZINK_FEATURES_H__\n\n')
++		f.write('class gfx_vk_physical_device;\n\n')
++		f.write(header)
++		f.write('#endif\n\n')
++
++
++def main():
++	with open(sys.argv[1], 'rb') as f:
++		data = json.load(f)
++
++		parse_extensions(data, sys.argv[2])
++
++
++if __name__ == '__main__':
++	main()

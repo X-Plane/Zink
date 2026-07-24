@@ -1,0 +1,1 @@
+This patch goes on top of [06f9e28304d5d3f109c33535c1c25b9df5769af2](https://gitlab.freedesktop.org/mesa/mesa/-/commit/06f9e28304d5d3f109c33535c1c25b9df5769af2) and is shipped with X-Plane 12.4.4+

@@ -1,0 +1,3 @@
+This patch goes on top of [d46e76ba84c36d35d1ec8267ae0d8cb68088cf27](https://gitlab.freedesktop.org/mesa/mesa/-/commit/d46e76ba84c36d35d1ec8267ae0d8cb68088cf27) and was shipped with X-Plane 12.04 to 12.4.3.
+
+This version of Zink is strongly married to X-Plane and was not upgradable without changes to X-Plane itself. In particular, most functionality was exposed as function pointers that replaced some of the core Vulkan functionality and that was hot wired into the Zink driver. There was no way to update this verion of Zink indepedently of X-Plane, the patch is only here for posterity.

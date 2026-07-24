@@ -1,0 +1,756 @@
+diff --git a/.gitattributes b/.gitattributes
+index 497cb563f54..52911160cc0 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -5,3 +5,4 @@
+ *.gif binary
+ *.ico binary
+ *.cl gitlab-language=c
++xplane/build.sh eol=lf
+diff --git a/meson.build b/meson.build
+index 933710ecdf1..b25d949cda1 100644
+--- a/meson.build
++++ b/meson.build
+@@ -330,7 +330,7 @@ if with_gallium and system_has_kms_drm
+   _glx = get_option('glx')
+   _egl = get_option('egl')
+   if _glx == 'dri' or _egl.enabled() or (_glx == 'disabled' and _egl.allowed())
+-    with_dri = true
++    with_dri = false
+   endif
+ endif
+ 
+@@ -432,7 +432,7 @@ endif
+ with_platform_android = _platforms.contains('android')
+ with_platform_x11 = _platforms.contains('x11')
+ with_platform_xcb = _platforms.contains('xcb')
+-with_platform_wayland = _platforms.contains('wayland')
++with_platform_wayland = false # _platforms.contains('wayland')
+ with_platform_haiku = _platforms.contains('haiku')
+ with_platform_windows = _platforms.contains('windows')
+ with_platform_macos = _platforms.contains('macos')
+@@ -1669,7 +1669,7 @@ dep_libdrm_intel = null_dep
+ 
+ _drm_amdgpu_ver = '2.4.121'
+ _drm_intel_ver = '2.4.75'
+-_drm_ver = '2.4.109'
++_drm_ver = '2.4.107'
+ 
+ _libdrm_checks = [
+   ['intel', with_gallium_i915],
+diff --git a/src/gallium/drivers/zink/zink_context.c b/src/gallium/drivers/zink/zink_context.c
+index 36e615fffc6..6810cb02b9e 100644
+--- a/src/gallium/drivers/zink/zink_context.c
++++ b/src/gallium/drivers/zink/zink_context.c
+@@ -2952,8 +2952,7 @@ zink_update_rendering_info(struct zink_context *ctx)
+ static unsigned
+ calc_max_dummy_fbo_size(struct zink_context *ctx)
+ {
+-   unsigned size = MAX2(ctx->fb_state.width, ctx->fb_state.height);
+-   return size ? size : MIN2(256, zink_screen(ctx->base.screen)->info.props.limits.maxImageDimension2D);
++   return 8;
+ }
+ 
+ ALWAYS_INLINE static void
+diff --git a/src/gallium/drivers/zink/zink_device_info.py b/src/gallium/drivers/zink/zink_device_info.py
+index cbd3fefb764..40f731b0373 100644
+--- a/src/gallium/drivers/zink/zink_device_info.py
++++ b/src/gallium/drivers/zink/zink_device_info.py
+@@ -464,6 +464,29 @@ zink_verify_device_extensions(struct zink_screen *screen);
+    %endif
+ %endfor
+ 
++
++struct zink_xplane_probe_functions
++{
++  uint32_t vk_version;
++  PFN_vkEnumerateDeviceExtensionProperties vkEnumerateDeviceExtensionProperties;
++  PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2;
++  PFN_vkGetPhysicalDeviceProperties2 vkGetPhysicalDeviceProperties2;
++};
++
++struct zink_xplane_probe_result
++{
++  bool can_run;
++  const char *fail_reason;
++
++  uint32_t num_extensions;
++  const char **extensions;
++  uint32_t num_features;
++  VkBaseOutStructure **features;
++};
++
++struct zink_xplane_probe_result 
++zink_xplane_probe_features(VkPhysicalDevice physical_device, struct zink_xplane_probe_functions *functions, const VkAllocationCallbacks *pAllocator);
++
+ #endif
+ """
+ 
+@@ -887,6 +910,313 @@ zink_verify_device_extensions(struct zink_screen *screen)
+ #endif
+ """
+ 
++probe_impl_code = """
++<%namespace name="helpers" file="helpers"/>
++#include <stdalign.h>
++
++struct zink_xplane_probe_result 
++zink_xplane_probe_features(VkPhysicalDevice physical_device, struct zink_xplane_probe_functions *functions, const VkAllocationCallbacks *pAllocator)
++{
++   struct zink_xplane_probe_result probe_result = {};
++
++%for ext in extensions:
++   <%helpers:guard ext="${ext}">
++      bool have_${ext.name_with_vendor()} = false;
++   </%helpers:guard>
++%endfor
++%for version in versions:
++   bool have_vulkan${version.struct()} = false;
++%endfor
++
++%for ext in extensions:
++   <%helpers:guard ext="${ext}">
++         bool support_${ext.name_with_vendor()} = false;
++      %if ext.is_promoted_to_khr:
++         bool support_${ext.name_with_vendor("KHR")} = false; /* promoted from EXT */
++      %endif
++   </%helpers:guard>
++%endfor
++   uint32_t num_extensions = 0;
++
++   // enumerate device supported extensions
++   VkResult result = functions->vkEnumerateDeviceExtensionProperties(physical_device, NULL, &num_extensions, NULL);
++   if (result < VK_SUCCESS)
++   {
++      probe_result.fail_reason = "ZINK: vkEnumerateDeviceExtensionProperties failed";
++      goto fail;
++   }
++
++   if (num_extensions > 0) {
++      VkExtensionProperties *extensions = MALLOC(sizeof(VkExtensionProperties) * num_extensions);
++      if (!extensions) goto fail;
++      result = functions->vkEnumerateDeviceExtensionProperties(physical_device, NULL, &num_extensions, extensions);
++      if (result < VK_SUCCESS)
++      {
++         FREE(extensions);
++
++         probe_result.fail_reason = "ZINK: vkEnumerateDeviceExtensionProperties failed";
++         goto fail;
++      }
++
++      for (uint32_t i = 0; i < num_extensions; ++i) {
++      %for ext in extensions:
++         <%helpers:guard ext="${ext}">
++            %if ext.is_promoted_to_khr:
++               bool promoted_${ext.pure_name()} = !strcmp(extensions[i].extensionName, "${ext.with_vendor("KHR")}");
++               if (!strcmp(extensions[i].extensionName, "${ext.name}") || promoted_${ext.pure_name()}) {
++            %else:
++               if (!strcmp(extensions[i].extensionName, "${ext.name}")) {
++            %endif
++            %if not (ext.has_features or ext.has_properties):
++                  have_${ext.name_with_vendor()} = true;
++            %else:
++                  support_${ext.name_with_vendor()} = true;
++            %endif
++            %if ext.is_promoted_to_khr:
++                  if (promoted_${ext.pure_name()}) {
++                     support_${ext.name_with_vendor("KHR")} = true;
++                  }
++            %endif
++               }
++         </%helpers:guard>
++      %endfor
++      }
++
++      FREE(extensions);
++   }
++
++   // get device features
++   VkPhysicalDeviceFeatures2 feats = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
++   VkPhysicalDeviceProperties2 props = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
++
++%for version in versions:
++   VkPhysicalDeviceVulkan${version.struct()}Features feats${version.struct()} = { ${version.stype("FEATURES")} };
++   VkPhysicalDeviceVulkan${version.struct()}Properties props${version.struct()} =  { ${version.stype("PROPERTIES")} };
++%endfor
++
++%for ext in extensions:
++   <%helpers:guard ext="${ext}">
++      %if ext.has_features:
++         ${ext.physical_device_struct("Features")} ${ext.field("feats")} = { ${ext.stype("FEATURES")} };
++      %endif
++      %if ext.has_properties:
++         ${ext.physical_device_struct("Properties")} ${ext.field("props")} = { ${ext.stype("PROPERTIES")} };
++      %endif
++   </%helpers:guard>
++%endfor
++
++   {
++      // check for device extension features
++%for version in versions:
++   %if version.device_version < (1,2,0):
++         if (VK_MAKE_VERSION(1,2,0) <= functions->vk_version) {
++            /* VkPhysicalDeviceVulkan11Features was added in 1.2, not 1.1 as one would think */
++   %else:
++         if (${version.version()} <= functions->vk_version) {
++   %endif
++            feats${version.struct()}.pNext = feats.pNext;
++            feats.pNext = &feats${version.struct()};
++            have_vulkan${version.struct()} = true;
++         }
++%endfor
++
++%for ext in extensions:
++   %if ext.has_features:
++      <%helpers:guard ext="${ext}">
++         %if ext.features_promoted:
++               if (support_${ext.name_with_vendor()} && !have_vulkan${ext.core_since.struct()}) {
++         %else:
++               if (support_${ext.name_with_vendor()}) {
++         %endif
++                  ${ext.field("feats")}.pNext = feats.pNext;
++                  feats.pNext = &${ext.field("feats")};
++               }
++      </%helpers:guard>
++   %endif
++%endfor
++
++      functions->vkGetPhysicalDeviceFeatures2(physical_device, &feats);
++   }
++
++
++    
++
++    if (functions->vkGetPhysicalDeviceProperties2) {
++%for version in versions:
++   %if version.device_version < (1,2,0):
++         if (VK_MAKE_VERSION(1,2,0) <= functions->vk_version) {
++            /* VkPhysicalDeviceVulkan11Properties was added in 1.2, not 1.1 as one would think */
++   %else:
++         if (${version.version()} <= functions->vk_version) {
++   %endif
++            props${version.struct()}.sType = ${version.stype("PROPERTIES")};
++            props${version.struct()}.pNext = props.pNext;
++            props.pNext = &props${version.struct()};
++         }
++%endfor
++
++%for ext in extensions:
++   %if ext.has_properties:
++      <%helpers:guard ext="${ext}">
++         %if ext.properties_promoted:
++               if (support_${ext.name_with_vendor()} && !have_vulkan${ext.core_since.struct()}) {
++         %else:
++               if (support_${ext.name_with_vendor()}) {
++         %endif
++                  ${ext.field("props")}.pNext = props.pNext;
++                  props.pNext = &${ext.field("props")};
++               }
++      </%helpers:guard>
++   %endif
++%endfor
++
++      functions->vkGetPhysicalDeviceProperties2(physical_device, &props);
++   }
++
++
++   /* We re-apply the fields from VkPhysicalDeviceVulkanXYFeatures struct
++    * onto their respective fields in the VkPhysicalDeviceExtensionNameFeatures
++    * struct if the former is provided by the VK implementation.
++    *
++    * As for why this is done: the spec mentions that once an extension is
++    * promoted to core and its feature fields are added in VulkanXYFeatures,
++    * including both ExtensionNameFeatures and VulkanXYFeatures at the same
++    * time is prohibited when using vkGetPhysicalDeviceFeatures2.
++    */
++%for ext in extensions:
++   %if ext.features_promoted:
++      if (have_vulkan${ext.core_since.struct()}) {
++      %for field in registry.get_registry_entry(ext.name).features_fields:
++         ${ext.field("feats")}.${field} = feats${ext.core_since.struct()}.${field};
++      %endfor
++      }
++   %endif
++%endfor
++
++   /* See above, but for VulkanXYProperties.
++    * Unlike VulkanXYFeatures with all the booleans, VulkanXYProperties can
++    * contain different types of data, including arrays. The C language hates us
++    * when we assign an array to another array, therefore we use an memcpy here.
++    */
++%for ext in extensions:
++   %if ext.properties_promoted:
++      if (have_vulkan${ext.core_since.struct()}) {
++      %for field in registry.get_registry_entry(ext.name).properties_fields:
++         memcpy(&${ext.field("props")}.${field.name},
++               &props${ext.core_since.struct()}.${field.name},
++               sizeof(${ext.field("props")}.${field.name}));
++      %endfor
++      }
++   %endif
++%endfor
++
++   // enable the extensions if they match the conditions given by ext.enable_conds 
++   if (functions->vkGetPhysicalDeviceProperties2) {
++        %for ext in extensions:
++<%helpers:guard ext="${ext}">
++<%
++    conditions = ""
++    if ext.enable_conds:
++        for cond in ext.enable_conds:
++            cond = cond.replace("$feats", ext.field("feats"))
++            cond = cond.replace("$props", ext.field("props"))
++            conditions += "&& (" + cond + ")\\n"
++    conditions = conditions.strip()
++%>\
++      have_${ext.name_with_vendor()} |= support_${ext.name_with_vendor()}
++         ${conditions};
++</%helpers:guard>
++        %endfor
++   }
++
++   // generate extension list
++   const char **extensions = MALLOC(${len(extensions)} * sizeof(const char *));
++   num_extensions = 0;
++
++%for ext in extensions:
++   <%helpers:guard ext="${ext}">
++         if (have_${ext.name_with_vendor()}) {
++      %if ext.is_promoted_to_khr:
++            if (support_${ext.name_with_vendor("KHR")})
++               extensions[num_extensions++] = "${ext.with_vendor("KHR")}";
++            else
++               extensions[num_extensions++] = "${ext.name}";
++      %else:
++            extensions[num_extensions++] = "${ext.name}";
++      %endif
++      %if ext.is_required:
++         } else {
++            probe_result.fail_reason = "ZINK: ${ext.name} required!";
++            goto fail;
++      %endif
++         }
++   </%helpers:guard>
++%endfor
++   
++   const char **ext_array = (const char **)pAllocator->pfnAllocation(pAllocator->pUserData, sizeof(const char *) * num_extensions, alignof(const char *), VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
++   memcpy(ext_array, extensions, sizeof(const char *) * num_extensions);
++
++   FREE(extensions);
++
++   probe_result.num_extensions = num_extensions;
++   probe_result.extensions = ext_array;
++   
++   
++   // Generate the features list
++   VkBaseOutStructure **features = MALLOC(${len(extensions) + len(versions)} * sizeof(VkBaseOutStructure *));
++   uint32_t num_features = 0;
++
++%for version in versions:
++   %if version.device_version < (1,2,0):
++         if (VK_MAKE_VERSION(1,2,0) <= functions->vk_version) {
++            /* VkPhysicalDeviceVulkan11Features was added in 1.2, not 1.1 as one would think */
++   %else:
++         if (${version.version()} <= functions->vk_version) {
++   %endif
++            VkPhysicalDeviceVulkan${version.struct()}Features *feature = (VkPhysicalDeviceVulkan${version.struct()}Features *)pAllocator->pfnAllocation(pAllocator->pUserData, sizeof(VkPhysicalDeviceVulkan${version.struct()}Features), alignof(VkPhysicalDeviceVulkan${version.struct()}Features), VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
++            *feature = feats${version.struct()};
++            feature->pNext = NULL;
++
++            features[num_features ++] = (VkBaseOutStructure *)feature;
++         }
++%endfor
++
++%for ext in extensions:
++   %if ext.has_features:
++      <%helpers:guard ext="${ext}">
++         %if ext.features_promoted:
++               if (have_${ext.name_with_vendor()} && !have_vulkan${ext.core_since.struct()}) {
++         %else:
++               if (have_${ext.name_with_vendor()}) {
++         %endif
++                  ${ext.physical_device_struct("Features")} *feature = (${ext.physical_device_struct("Features")} *)pAllocator->pfnAllocation(pAllocator->pUserData, sizeof(${ext.physical_device_struct("Features")}), alignof(${ext.physical_device_struct("Features")}), VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
++                  *feature = ${ext.field("feats")};
++                  feature->pNext = NULL;
++
++                  features[num_features ++] = (VkBaseOutStructure *)feature;
++               }
++      </%helpers:guard>
++   %endif
++%endfor
++
++   VkBaseOutStructure **feat_array = (VkBaseOutStructure **)pAllocator->pfnAllocation(pAllocator->pUserData, sizeof(VkBaseOutStructure *) * num_features, alignof(VkBaseOutStructure *), VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
++   memcpy(feat_array, features, sizeof(VkBaseOutStructure *) * num_features);
++
++   FREE(features);
++
++   probe_result.num_features = num_features;
++   probe_result.features = feat_array;
++
++   probe_result.can_run = true;
++   return probe_result;
++
++fail:
++
++   probe_result.can_run = false;
++   return probe_result;
++}
++"""
++
+ 
+ def replace_code(code: str, replacement: dict):
+     for (k, v) in replacement.items():
+@@ -977,3 +1307,9 @@ if __name__ == "__main__":
+         impl = Template(impl_code, lookup=lookup).render(extensions=extensions, versions=versions, registry=registry).strip()
+         impl = replace_code(impl, replacement)
+         print(impl, file=impl_file)
++
++        probe_impl = Template(probe_impl_code, lookup=lookup).render(extensions=extensions, versions=versions, registry=registry).strip()
++        probe_impl = replace_code(probe_impl, replacement)
++        print(probe_impl, file=impl_file)
++
++        
+diff --git a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+index 52c70ac8792..62f9b3ef616 100644
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -93,6 +93,18 @@ bool zink_tracing = false;
+ #include <xf86drm.h>
+ #endif
+ 
++PFN_vkGetInstanceProcAddr s_xplane_get_instance_proc_addr;
++PFN_vkGetDeviceProcAddr s_xplane_get_device_proc_addr;
++
++PUBLIC void *
++zink_xplane_register_functions(void *zink_get_instance_proc, void *zink_get_device_proc)
++{
++   s_xplane_get_instance_proc_addr = zink_get_instance_proc;
++   s_xplane_get_device_proc_addr = zink_get_device_proc;
++
++   return &zink_xplane_probe_features;
++}
++
+ static const struct debug_named_value
+ zink_debug_options[] = {
+    { "nir", ZINK_DEBUG_NIR, "Dump NIR during program compile" },
+@@ -3363,6 +3375,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+ 
+    u_trace_state_init();
+ 
++#if 0
+    screen->loader_lib = util_dl_open(VK_LIBNAME);
+    if (!screen->loader_lib) {
+       if (!screen->driver_name_is_inferred)
+@@ -3372,6 +3385,11 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+ 
+    screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, "vkGetInstanceProcAddr");
+    screen->vk_GetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)util_dl_get_proc_address(screen->loader_lib, "vkGetDeviceProcAddr");
++#else
++   screen->vk_GetInstanceProcAddr = s_xplane_get_instance_proc_addr;
++   screen->vk_GetDeviceProcAddr = s_xplane_get_device_proc_addr;
++#endif
++
+    if (!screen->vk_GetInstanceProcAddr ||
+        !screen->vk_GetDeviceProcAddr) {
+       if (!screen->driver_name_is_inferred)
+diff --git a/src/gallium/drivers/zink/zink_screen.h b/src/gallium/drivers/zink/zink_screen.h
+index 7e6ce005030..e8017fb2991 100644
+--- a/src/gallium/drivers/zink/zink_screen.h
++++ b/src/gallium/drivers/zink/zink_screen.h
+@@ -211,6 +211,9 @@ zink_screen_debug_marker_begin(struct zink_screen *screen, const char *fmt, ...)
+ void
+ zink_screen_debug_marker_end(struct zink_screen *screen, bool emitted);
+ 
++PUBLIC void *
++zink_xplane_register_functions(void *zink_get_instance_proc, void *zink_get_device_proc);
++
+ #define warn_missing_feature(warned, feat) \
+    do { \
+       if (!warned) { \
+diff --git a/src/gallium/frontends/wgl/stw_st.c b/src/gallium/frontends/wgl/stw_st.c
+index dc46260ca65..5a9ea25a7f0 100644
+--- a/src/gallium/frontends/wgl/stw_st.c
++++ b/src/gallium/frontends/wgl/stw_st.c
+@@ -38,6 +38,8 @@
+ #include "stw_pixelformat.h"
+ #include "stw_winsys.h"
+ 
++#undef GALLIUM_ZINK
++
+ #ifdef GALLIUM_ZINK
+ #include <vulkan/vulkan.h>
+ #include "kopper_interface.h"
+diff --git a/src/gallium/targets/dri/dri.sym.in b/src/gallium/targets/dri/dri.sym.in
+index d987668e4f5..7a702d2162e 100644
+--- a/src/gallium/targets/dri/dri.sym.in
++++ b/src/gallium/targets/dri/dri.sym.in
+@@ -72,6 +72,7 @@
+ 		dri3*;
+ 		loader_dri3*;
+ 		dri_create_drawable;
++		zink_xplane_register_functions;
+ 		@nouveau_drm_screen_create@
+ 		@radeon_drm_winsys_create@
+ 		@amdgpu_winsys_create@
+diff --git a/src/gallium/targets/wgl/gallium_wgl.def.in b/src/gallium/targets/wgl/gallium_wgl.def.in
+index 412225f631f..1dd1f5f41e2 100644
+--- a/src/gallium/targets/wgl/gallium_wgl.def.in
++++ b/src/gallium/targets/wgl/gallium_wgl.def.in
+@@ -51,5 +51,7 @@ stw_interop_query_device_info
+ stw_interop_export_object
+ stw_interop_flush_objects
+ 
++zink_xplane_register_functions
++
+ _mesa_glapi_get_proc_address
+ _mesa_glapi_get_dispatch
+diff --git a/src/loader/loader.c b/src/loader/loader.c
+index aeefe642510..01f29be1602 100644
+--- a/src/loader/loader.c
++++ b/src/loader/loader.c
+@@ -308,6 +308,8 @@ char *
+ loader_get_render_node(dev_t device)
+ {
+    char *render_node = NULL;
++
++#if 0
+    drmDevicePtr dev_ptr;
+ 
+    if (drmGetDeviceFromDevId(device, 0, &dev_ptr) < 0)
+@@ -320,6 +322,7 @@ loader_get_render_node(dev_t device)
+    }
+ 
+    drmFreeDevice(&dev_ptr);
++#endif
+ 
+    return render_node;
+ }
+@@ -382,6 +385,7 @@ static char *drm_construct_id_path_tag(drmDevicePtr device)
+ {
+    char *tag = NULL;
+ 
++#if 0
+    if (device->bustype == DRM_BUS_PCI) {
+       if (asprintf(&tag, "pci-%04x_%02x_%02x_%1u",
+                    device->businfo.pci->domain,
+@@ -418,6 +422,7 @@ static char *drm_construct_id_path_tag(drmDevicePtr device)
+ 
+       free(name);
+    }
++   #endif
+    return tag;
+ }
+ 
+@@ -438,18 +443,23 @@ static bool drm_device_matches_tag(drmDevicePtr device, const char *prime_tag)
+ static char *drm_get_id_path_tag_for_fd(int fd)
+ {
+    drmDevicePtr device;
+-   char *tag;
++   char *tag = NULL;
+ 
++#if 0
+    if (drmGetDevice2(fd, 0, &device) != 0)
+        return NULL;
+ 
+    tag = drm_construct_id_path_tag(device);
+    drmFreeDevice(&device);
++#endif   
+    return tag;
+ }
+ 
+ bool loader_get_user_preferred_fd(int *fd_render_gpu, int *original_fd)
+ {
++   return false;
++
++#if 0
+    const char *dri_prime = getenv("DRI_PRIME");
+    bool debug = debug_get_bool_option("DRI_PRIME_DEBUG", false);
+    char *default_tag = NULL;
+@@ -644,11 +654,13 @@ bool loader_get_user_preferred_fd(int *fd_render_gpu, int *original_fd)
+    if (original_fd)
+       *original_fd = *fd_render_gpu;
+    return false;
++#endif
+ }
+ 
+ static bool
+ drm_get_pci_id_for_fd(int fd, int *vendor_id, int *chip_id)
+ {
++   #if 0
+    drmDevicePtr device;
+ 
+    if (drmGetDevice2(fd, 0, &device) != 0) {
+@@ -666,6 +678,9 @@ drm_get_pci_id_for_fd(int fd, int *vendor_id, int *chip_id)
+    *chip_id = device->deviceinfo.pci->device_id;
+    drmFreeDevice(&device);
+    return true;
++   #endif
++
++   return false;
+ }
+ 
+ #ifdef __linux__
+@@ -720,7 +735,8 @@ loader_get_pci_id_for_fd(int fd, int *vendor_id, int *chip_id)
+ char *
+ loader_get_device_name_for_fd(int fd)
+ {
+-   return drmGetDeviceNameFromFd2(fd);
++   return NULL;
++   //return drmGetDeviceNameFromFd2(fd);
+ }
+ 
+ static char *
+diff --git a/xplane/build.sh b/xplane/build.sh
+new file mode 100755
+index 00000000000..9117c1c6f82
+--- /dev/null
++++ b/xplane/build.sh
+@@ -0,0 +1,91 @@
++BUILD_TYPE=debugoptimized
++
++BASE_PATH="$(pwd)"
++BUILD_PATH="${BASE_PATH}/xplane/"
++PYTHON_EXECUTABLE="python"
++
++case "$(uname -s)" in
++	Linux)
++		BUILD_TYPE=release
++		;;
++	MINGW*)
++		;;
++	*)
++		echo "Unknown target platform $(uname -s)"
++		;;
++esac
++
++build_mesa()
++{
++	meson setup "${BUILD_PATH}/build64" --libdir lib64 --prefix "${BUILD_PATH}/build64/bin" -Dunversion-libgallium=true -Dglvnd=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled -Dgbm=disabled -Dgallium-drivers=zink -Dvulkan-drivers= -Dbuildtype=${BUILD_TYPE}
++	ninja -C "${BUILD_PATH}/build64"
++	ninja -C "${BUILD_PATH}/build64" install
++}
++
++build_linux()
++{
++	build_mesa
++
++	# Copy over the Mesa libraries we just built
++	cp ${BUILD_PATH}/build64/bin/lib64/libGL.so.1.2.0 ${BUILD_PATH}/bin/libGL.so
++	cp ${BUILD_PATH}/build64/bin/lib64/libgallium_dri.so ${BUILD_PATH}/bin/libgallium_dri.so
++
++	# Copy over the support libraries we need to link on other distros
++	cp /lib/x86_64-linux-gnu/libsensors.so.5.0.0 ${BUILD_PATH}/bin/libsensors.so.5
++}
++
++build_windows()
++{
++	OLD_PATH=${PATH}
++
++	# Strip our path a bit, removing /usr/bin and /bin so we don't pick up the GNU linker by accident
++	PATH=$(echo ${PATH} | sed -e 's|:/usr/bin||')
++	PATH=$(echo ${PATH} | sed -e 's|:/bin||')
++	export PATH
++
++	build_mesa
++	
++	# Restore our path so we find the core utils again
++	PATH=${OLD_PATH}
++	export PATH
++
++	cp "${BUILD_PATH}/build64/bin/bin/libgallium_wgl.dll" "${BUILD_PATH}/bin/"
++	cp "${BUILD_PATH}/build64/bin/bin/libgallium_wgl.pdb" "${BUILD_PATH}/bin/"
++
++	cp "${BUILD_PATH}/build64/bin/bin/opengl32.dll" "${BUILD_PATH}/bin/"
++	cp "${BUILD_PATH}/build64/bin/bin/opengl32.pdb" "${BUILD_PATH}/bin/"
++
++	cp "${BUILD_PATH}/build64/bin/bin/z-1.dll" "${BUILD_PATH}/bin/"
++	cp "${BUILD_PATH}/build64/bin/bin/z-1.pdb" "${BUILD_PATH}/bin/"
++}
++
++while test $# -gt 0
++do
++	case "$1" in
++		--debug) BUILD_TYPE=debug
++			;;
++		--clean)
++			rm -rf "${BUILD_PATH}/build64"
++			rm -rf "${BUILD_PATH}/bin"
++			;;
++		*) echo "Unknown option ${1}"
++			;;
++	esac
++
++	shift
++done
++
++mkdir -p "${BUILD_PATH}/bin"
++
++case "$(uname -s)" in
++	Linux)
++		PYTHON_EXECUTABLE="python3"
++		build_linux
++		;;
++	MINGW*)
++		build_windows
++		;;
++	*)
++		echo "Unknown target platform $(uname -s)"
++		;;
++esac
+diff --git a/xplane/docker/Dockerfile b/xplane/docker/Dockerfile
+new file mode 100644
+index 00000000000..dd905bb6fea
+--- /dev/null
++++ b/xplane/docker/Dockerfile
+@@ -0,0 +1,51 @@
++FROM --platform=linux/amd64 ubuntu:focal
++
++# Just enough stuff to get us limping along...
++RUN apt-get update && apt-get install --no-install-recommends -y \
++    wget \
++    gpg-agent \
++    software-properties-common
++
++# Now we need to get CMake 3.19.2 because apt only goes up to 3.16 on 20.04LTS but our minimum is 3.19.
++RUN wget https://cmake.org/files/v3.19/cmake-3.19.2-Linux-x86_64.sh
++RUN /bin/bash cmake-3.19.2-Linux-x86_64.sh --skip-license --prefix=/usr
++
++# Let's us get access to newer a newer CLANG toolchain than Ubuntu 20.04LTS comes with. It wants 12, we want 13. 
++RUN wget -q https://apt.llvm.org/llvm-snapshot.gpg.key
++RUN apt-key add llvm-snapshot.gpg.key
++RUN add-apt-repository 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-13 main'
++
++# Install the wayland protocols version we need
++RUN wget http://archive.ubuntu.com/ubuntu/pool/main/w/wayland-protocols/wayland-protocols_1.25-1_all.deb
++RUN apt-get install ./wayland-protocols_1.25-1_all.deb
++
++# Install base stuff
++RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
++    build-essential \
++    ninja-build \
++    gdb \
++    lldb \
++    llvm-13 \
++    clang-13 \
++    libc++-13-dev \
++    libc++abi-13-dev
++
++# Install Mesa Dependencies
++RUN cp /etc/apt/sources.list /etc/apt/sources.list~ && sed -Ei 's/^# deb-src /deb-src /' /etc/apt/sources.list && apt-get update && apt-get build-dep mesa -y
++
++# Upgrade Meson
++RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
++    python3.9 \
++    python3-pip
++
++RUN apt-get remove meson -y
++
++RUN ln -s $(which python3.9) /usr/local/bin/python3
++RUN python3 -m pip install meson
++RUN python3 -m pip install mako
++
++# Create a user so the Docker container is usable in CLion. Build with --build-arg UID=$(id -u)
++ARG UID=1000
++RUN useradd -m -u ${UID} -s /bin/bash builder
++USER builder
++
